@@ -2,6 +2,13 @@
 
 Injects crime scores (NYPD), HPD violations, noise complaints, DOB issues under listing cards and detail pages.
 
+## UI
+Main listings view:
+![listings view](listview.png)
+
+When you scroll down on a specific listing, to below the About section:
+![specific listing view](listingview.png)
+
 ## Install
 ```
 1. Tampermonkey/Violentmonkey
