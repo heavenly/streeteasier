@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         StreetEasy NYC Safety & Insights Overlay
 // @namespace    https://streeteasy.com/
-// @version      2.2.0
-// @description  Cards: Crime+HPD. Details: Full insights panel under About Building
+// @version      2.3.0
+// @description  Cards: Crime+HPD. Details: Full insights panel under About Building. HPD deep links.
 // @author       heavenly
 // @match        https://streeteasy.com/*
 // @grant        GM_xmlhttpRequest
@@ -30,15 +30,20 @@ const CONFIG = {
   ],
 };
 
-const NYPD_YTD      = 'https://data.cityofnewyork.us/resource/uip8-fykc.json';
-const NYPD_HIST     = 'https://data.cityofnewyork.us/resource/8h9b-rp9u.json';
-const HPD_COMP      = 'https://data.cityofnewyork.us/resource/uwyv-629c.json';
-const HPD_VIOL      = 'https://data.cityofnewyork.us/resource/wvxf-dwi5.json';
-const NYC_311       = 'https://data.cityofnewyork.us/resource/erm2-nwe9.json';
-const DOB_VIOL      = 'https://data.cityofnewyork.us/resource/h2n3-pwk2.json';
+const NYPD_YTD  = 'https://data.cityofnewyork.us/resource/uip8-fykc.json';
+const NYPD_HIST = 'https://data.cityofnewyork.us/resource/8h9b-rp9u.json';
+const HPD_COMP  = 'https://data.cityofnewyork.us/resource/uwyv-629c.json';
+const HPD_VIOL  = 'https://data.cityofnewyork.us/resource/wvxf-dwi5.json';
+const HPD_BLDG  = 'https://data.cityofnewyork.us/resource/kj4p-ruqc.json';
+const NYC_311   = 'https://data.cityofnewyork.us/resource/erm2-nwe9.json';
+const DOB_VIOL  = 'https://data.cityofnewyork.us/resource/h2n3-pwk2.json';
+
+// ─── STATE ────────────────────────────────────────────────────────────────
+let seIsInjecting = false;
+let seCurrentUrl  = '';
 
 // ─── CACHE ────────────────────────────────────────────────────────────────
-function lsKey(k) { return `se_v22_${k}`; }
+function lsKey(k) { return `se_v23_${k}`; }
 
 function getCache(key) {
   try {
@@ -154,16 +159,17 @@ async function fetchHPD(address) {
   if (cached) return cached;
 
   const m = address.match(/^(\d+[\w-]*)\s+(.+)/);
-  if (!m) return { complaints: 0, violations: 0, openViolations: 0, pest: 0 };
+  if (!m) return { complaints: 0, violations: 0, openViolations: 0, pest: 0, buildingId: null };
 
   const hnum   = m[1];
   const street = m[2].replace(/,.*/, '').trim().toUpperCase();
   const where  = encodeURIComponent(`housenumber='${hnum}' AND streetname LIKE '${street}%'`);
   const token  = CONFIG.APP_TOKEN ? `&$$app_token=${CONFIG.APP_TOKEN}` : '';
 
-  const [complaints, violations] = await Promise.all([
+  const [complaints, violations, buildingRows] = await Promise.all([
     gmFetch(`${HPD_COMP}?$where=${where}&$limit=100${token}`),
     gmFetch(`${HPD_VIOL}?$where=${where}&$limit=100${token}`),
+    gmFetch(`${HPD_BLDG}?$where=${where}&$select=buildingid&$limit=1${token}`),
   ]);
 
   const openViolations = (violations || []).filter(v =>
@@ -179,6 +185,7 @@ async function fetchHPD(address) {
     violations:     violations?.length || 0,
     openViolations,
     pest,
+    buildingId:     buildingRows?.[0]?.buildingid || null,
   };
   setCache(ck, result);
   return result;
@@ -242,7 +249,6 @@ function getDetailAddress() {
 }
 
 function getListingAgeDays() {
-  // Use TreeWalker - no jQuery :contains()
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
   let node;
   while ((node = walker.nextNode())) {
@@ -265,16 +271,31 @@ function getDangerLevel(score) {
   return CONFIG.DANGER_THRESHOLDS[3];
 }
 
+// ─── HPD URL HELPER ───────────────────────────────────────────────────────
+function hpdUrl(hpd) {
+  return hpd?.buildingId
+    ? `https://hpdonline.nyc.gov/hpdonline/building/${hpd.buildingId}/overview`
+    : 'https://hpdonline.nyc.gov/hpdonline/';
+}
+
 // ─── CARD UI ──────────────────────────────────────────────────────────────
 function buildCardBadge(crime, hpd) {
   if (!crime && !hpd) return '';
   const danger = getDangerLevel(crime?.score || 0);
+  const url    = hpdUrl(hpd);
 
-  const fBadge = crime?.breakdown?.F > 0 ? `<span style="background:#dc2626;color:#fff;border-radius:4px;padding:1px 5px;font-size:10px;">${crime.breakdown.F}F</span> ` : '';
-  const mBadge = crime?.breakdown?.M > 0 ? `<span style="background:#f97316;color:#fff;border-radius:4px;padding:1px 5px;font-size:10px;">${crime.breakdown.M}M</span> ` : '';
+  const fBadge = crime?.breakdown?.F > 0
+    ? `<span style="background:#dc2626;color:#fff;border-radius:4px;padding:1px 5px;font-size:10px;">${crime.breakdown.F}F</span> `
+    : '';
+  const mBadge = crime?.breakdown?.M > 0
+    ? `<span style="background:#f97316;color:#fff;border-radius:4px;padding:1px 5px;font-size:10px;">${crime.breakdown.M}M</span> `
+    : '';
+
   const hpdBadge = hpd?.openViolations > 0
-    ? `<span style="background:#dc2626;color:#fff;border-radius:4px;padding:1px 5px;font-size:10px;">${hpd.openViolations} HPD open</span>`
-    : `<span style="color:#22c55e;font-size:10px;">✓ HPD clean</span>`;
+    ? `<a href="${url}" target="_blank" style="text-decoration:none;">
+         <span style="background:#dc2626;color:#fff;border-radius:4px;padding:1px 5px;font-size:10px;cursor:pointer;">${hpd.openViolations} HPD open</span>
+       </a>`
+    : `<a href="${url}" target="_blank" style="text-decoration:none;color:#22c55e;font-size:10px;">✓ HPD clean</a>`;
 
   return `
     <div class="se-card-badge" style="
@@ -298,6 +319,7 @@ function buildCardBadge(crime, hpd) {
 // ─── DETAIL PANEL UI ──────────────────────────────────────────────────────
 function buildDetailPanel(crime, hpd, noise, dob, ageDays) {
   const danger = getDangerLevel(crime?.score || 0);
+  const url    = hpdUrl(hpd);
 
   function card(emoji, title, value, sub, valueColor) {
     return `
@@ -333,8 +355,7 @@ function buildDetailPanel(crime, hpd, noise, dob, ageDays) {
           `${crime?.breakdown?.F||0}F · ${crime?.breakdown?.M||0}M · ${crime?.score?.toFixed(1)||0} pts/mo`, crimeColor)}
 
         ${card('🏠','HPD Open', hpd?.openViolations || 0,
-          `${hpd?.complaints||0} complaints · ${hpd?.violations||0} total`,
-          hpdColor)}
+          `${hpd?.complaints||0} complaints · ${hpd?.violations||0} total`, hpdColor)}
 
         ${hpd?.pest > 0 ? card('🪳','Pest Reports', hpd.pest, 'on record', '#f97316') : ''}
 
@@ -347,8 +368,10 @@ function buildDetailPanel(crime, hpd, noise, dob, ageDays) {
 
       <div style="margin-top:14px;font-size:11px;color:#9ca3af;display:flex;justify-content:space-between;align-items:center;">
         <span>NYPD • HPD • DOB • NYC 311 • Refreshes every 24h</span>
-        <a href="https://hpdonline.nyc.gov/hpdonline/" target="_blank"
-           style="color:#0041D9;text-decoration:none;font-size:11px;">HPD Online ↗</a>
+        <a href="${url}" target="_blank"
+           style="color:#0041D9;text-decoration:none;font-size:11px;">
+          ${hpd?.buildingId ? 'HPD Building Page ↗' : 'HPD Online ↗'}
+        </a>
       </div>
     </div>
   `;
@@ -356,7 +379,6 @@ function buildDetailPanel(crime, hpd, noise, dob, ageDays) {
 
 // ─── FIND ABOUT SECTION ───────────────────────────────────────────────────
 function findAboutSection() {
-  // Explicit class fragments (most reliable)
   const explicit = document.querySelector([
     '[class*="AboutBuilding"]',
     '[class*="about-building"]',
@@ -368,7 +390,6 @@ function findAboutSection() {
   ].join(','));
   if (explicit) return explicit;
 
-  // Walk sections looking for "About" heading
   for (const el of document.querySelectorAll('section, article, [class*="Section"]')) {
     const heading = el.querySelector('h1,h2,h3,h4,h5,h6');
     if (heading?.textContent.toLowerCase().includes('about')) return el;
@@ -379,7 +400,6 @@ function findAboutSection() {
 
 // ─── INJECT DETAIL PANEL ─────────────────────────────────────────────────
 function injectDetailPanel(crime, hpd, noise, dob, ageDays) {
-  // Always nuke stale panel
   document.querySelector('.se-insights-panel')?.remove();
 
   const div = document.createElement('div');
@@ -393,7 +413,6 @@ function injectDetailPanel(crime, hpd, noise, dob, ageDays) {
     return;
   }
 
-  // Fallback: prepend to main
   const main = document.querySelector('main, [class*="mainContainer"], [class*="main"]');
   if (main) {
     main.prepend(panel);
@@ -439,9 +458,13 @@ async function processCard(card) {
 }
 
 async function processDetailPage() {
-  // Re-inject if panel was wiped from DOM
+  if (seIsInjecting) return;
+
   const existing = document.querySelector('.se-insights-panel');
   if (existing && document.body.contains(existing)) return;
+
+  const currentUrl = window.location.href;
+  if (currentUrl === seCurrentUrl && existing && document.body.contains(existing)) return;
 
   const address = getDetailAddress();
   if (!address) { console.log('[SE Insights] No address found'); return; }
@@ -450,24 +473,39 @@ async function processDetailPage() {
   const coords = extractPageCoords() || await geocodeAddress(address);
   if (!coords) { console.log('[SE Insights] No coords for:', address); return; }
 
-  const [crime, hpd, noise, dob, ageDays] = await Promise.all([
-    fetchCrime(coords.lat, coords.lon),
-    fetchHPD(address),
-    fetchNoise(coords.lat, coords.lon),
-    fetchDOB(address),
-    Promise.resolve(getListingAgeDays()),
-  ]);
+  seIsInjecting = true;
+  observer.disconnect();
 
-  injectDetailPanel(crime, hpd, noise, dob, ageDays);
-  console.log('[SE Insights] Detail panel complete');
+  try {
+    const [crime, hpd, noise, dob, ageDays] = await Promise.all([
+      fetchCrime(coords.lat, coords.lon),
+      fetchHPD(address),
+      fetchNoise(coords.lat, coords.lon),
+      fetchDOB(address),
+      Promise.resolve(getListingAgeDays()),
+    ]);
+
+    injectDetailPanel(crime, hpd, noise, dob, ageDays);
+    seCurrentUrl = currentUrl;
+    console.log('[SE Insights] Detail panel complete. HPD buildingId:', hpd?.buildingId || 'not found');
+  } finally {
+    seIsInjecting = false;
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
 }
 
 // ─── OBSERVER ─────────────────────────────────────────────────────────────
 let seDetailTimer = null;
 
 const observer = new MutationObserver((mutations) => {
-  // Detail page: debounce re-injection after React re-renders
+  if (seIsInjecting) return;
+
   if (isDetailPage()) {
+    // Reset seCurrentUrl on navigation so new pages always re-fetch
+    if (window.location.href !== seCurrentUrl) {
+      document.querySelector('.se-insights-panel')?.remove();
+    }
+
     clearTimeout(seDetailTimer);
     seDetailTimer = setTimeout(() => {
       const existing = document.querySelector('.se-insights-panel');
@@ -477,7 +515,6 @@ const observer = new MutationObserver((mutations) => {
     }, 1500);
   }
 
-  // Cards: process new nodes as they appear
   for (const mut of mutations) {
     for (const node of mut.addedNodes) {
       if (node.nodeType !== 1) continue;
